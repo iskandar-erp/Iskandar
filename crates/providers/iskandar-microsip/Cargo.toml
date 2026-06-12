@@ -1,0 +1,19 @@
+[package]
+name = "iskandar-microsip"
+description = "Provider Microsip (ApiMicrosip.dll) para Iskandar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+iskandar-core.workspace = true
+serde.workspace = true
+
+# La integración real solo existe en Windows: ApiMicrosip.dll es Win32.
+[target.'cfg(windows)'.dependencies]
+async-trait.workspace = true
+libloading.workspace = true
+tokio.workspace = true
+tracing.workspace = true

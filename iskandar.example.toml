@@ -1,0 +1,18 @@
+# Configuración de ejemplo de Iskandar.
+# Copia este archivo como `iskandar.toml` y ajusta los valores.
+# `iskandar.toml` está en .gitignore: nunca subas credenciales al repo.
+
+[server]
+port = 8080
+
+[providers.microsip]
+dll_path = 'C:\Microsip\ApiMicrosip.dll'
+# Ruta local o remota de la base de empresa Firebird
+# (formato remoto: 'host:C:\ruta\EMPRESA.FDB')
+db_path = 'C:\Microsip datos\EMPRESA.FDB'
+usuario = "SYSDBA"
+password = "cambiame"
+# Base de Metadatos para ChecaCompatibilidad* (opcional)
+# metadatos_path = 'C:\Microsip datos\Metadatos.FDB'
+existencias_negativas = true
+validar_precio_minimo = false

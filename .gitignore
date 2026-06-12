@@ -1,0 +1,24 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Usar iskandar.example.toml como plantilla
+iskandar.toml
+*.fdb
+
+
+# (contiene datos de infraestructura propia y documentación propietaria)
+Contexto/
+Microsip/
+
+# La landing es su propio repo no va en el core
+web/
+
+# Herramientas locales (sesiones de agentes, editores)
+.claude/
+.vscode/
+.idea/
+
+# Variables de entorno locales
+.env
+.env.*
