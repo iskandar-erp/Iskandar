@@ -72,6 +72,12 @@ impl ERPProvider for MicrosipProvider {
         let config = self.config.clone();
         run_blocking(move || {
             let handle = dll.connect(&config.db_path, &config.usuario, &config.password)?;
+            if !dll.connected(handle)? {
+                dll.disconnect(handle).ok();
+                return Err(IskandarError::Connection(
+                    "DBConnect retornó éxito pero DBConnected reporta desconectado".into(),
+                ));
+            }
             dll.disconnect(handle)
         })
         .await
