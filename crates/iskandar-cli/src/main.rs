@@ -53,6 +53,26 @@ enum Command {
         #[arg(long)]
         provider: String,
     },
+    /// Inspecciona el esquema de la base de datos del ERP.
+    ///
+    /// Sin --tabla lista todas las tablas; con --tabla describe sus columnas.
+    Schema {
+        #[arg(long)]
+        provider: String,
+        /// Nombre de la tabla a describir (p. ej. CLIENTES). Opcional.
+        #[arg(long)]
+        tabla: Option<String>,
+        /// Junto con --tabla: en vez de describir columnas, lista los
+        /// valores distintos que existen para este campo (útil para
+        /// descifrar campos tipo código, p. ej. TIPO_DOCTO).
+        #[arg(long)]
+        valores: Option<String>,
+        /// Junto con --tabla: imprime las primeras N filas reales (todas
+        /// las columnas, como texto). Útil para ver el formato exacto en
+        /// que la DLL devuelve fechas/decimales antes de parsearlos.
+        #[arg(long)]
+        muestra: Option<u32>,
+    },
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -94,6 +114,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Command::Init { provider, dll_path } => init(&cli.config, &provider, dll_path.as_deref()),
         Command::Serve { port } => serve(&cli.config, port).await,
         Command::Test { provider } => test(&cli.config, &provider).await,
+        Command::Schema { provider, tabla, valores, muestra } => {
+            schema(&cli.config, &provider, tabla.as_deref(), valores.as_deref(), muestra).await
+        }
     }
 }
 
@@ -174,6 +197,87 @@ async fn serve(config_path: &Path, port: Option<u16>) -> Result<(), Box<dyn Erro
     tracing::info!("Iskandar escuchando en http://0.0.0.0:{port}");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn schema(
+    config_path: &Path,
+    provider_name: &str,
+    tabla: Option<&str>,
+    valores: Option<&str>,
+    muestra: Option<u32>,
+) -> Result<(), Box<dyn Error>> {
+    #[cfg(not(windows))]
+    {
+        let _ = (config_path, provider_name, tabla, valores, muestra);
+        return Err("el subcomando schema solo está disponible en Windows (requiere ApiMicrosip.dll)".into());
+    }
+
+    #[cfg(windows)]
+    {
+        let config = load_config(config_path)?;
+        let provider_config = config.providers.get(provider_name).ok_or_else(|| {
+            format!(
+                "no hay sección [providers.{provider_name}] en '{}'",
+                config_path.display()
+            )
+        })?;
+
+        if provider_name != "microsip" {
+            return Err(format!("schema solo soporta el provider 'microsip' por ahora (recibido: '{provider_name}')").into());
+        }
+
+        let microsip_config = provider_config.typed::<iskandar_microsip::MicrosipConfig>()?;
+        let provider = iskandar_microsip::MicrosipProvider::new(microsip_config)?;
+
+        match tabla {
+            None => {
+                let tablas = provider.listar_tablas().await?;
+                println!("{} tablas encontradas:\n", tablas.len());
+                for t in &tablas {
+                    println!("  {t}");
+                }
+            }
+            Some(nombre_tabla) if valores.is_some() => {
+                let campo = valores.unwrap();
+                let vals = provider.valores_distintos(nombre_tabla, campo).await?;
+                println!(
+                    "Valores distintos de {}.{} ({}):\n",
+                    nombre_tabla.to_uppercase(),
+                    campo.to_uppercase(),
+                    vals.len()
+                );
+                for v in &vals {
+                    println!("  {v:?}");
+                }
+            }
+            Some(nombre_tabla) if muestra.is_some() => {
+                let limite = muestra.unwrap();
+                let filas = provider.muestra_tabla(nombre_tabla, limite).await?;
+                println!("{} fila(s) de muestra de {}:\n", filas.len(), nombre_tabla.to_uppercase());
+                for (i, fila) in filas.iter().enumerate() {
+                    println!("--- fila {} ---", i + 1);
+                    for (campo, valor) in fila {
+                        println!("  {campo:<30} {valor:?}");
+                    }
+                    println!();
+                }
+            }
+            Some(nombre_tabla) => {
+                let campos = provider.describir_tabla(nombre_tabla).await?;
+                if campos.is_empty() {
+                    println!("La tabla '{nombre_tabla}' no existe o no tiene columnas.");
+                    return Ok(());
+                }
+                println!("Tabla: {}\n", nombre_tabla.to_uppercase());
+                println!("  {:<35} {}", "CAMPO", "TIPO");
+                println!("  {}", "-".repeat(55));
+                for c in &campos {
+                    println!("  {:<35} {}", c.nombre, c.tipo);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn test(config_path: &Path, provider_name: &str) -> Result<(), Box<dyn Error>> {

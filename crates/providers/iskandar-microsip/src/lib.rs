@@ -13,8 +13,12 @@ pub mod models;
 #[cfg(windows)]
 pub mod dll;
 #[cfg(windows)]
+pub mod articulos;
+#[cfg(windows)]
+pub mod clientes;
+#[cfg(windows)]
 pub mod provider;
 
 pub use models::MicrosipConfig;
 #[cfg(windows)]
-pub use provider::MicrosipProvider;
+pub use provider::{CampoSchema, MicrosipProvider};

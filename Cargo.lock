@@ -576,8 +576,10 @@ name = "iskandar-microsip"
 version = "0.1.0-alpha"
 dependencies = [
  "async-trait",
+ "chrono",
  "iskandar-core",
  "libloading",
+ "rust_decimal",
  "serde",
  "tokio",
  "tracing",

@@ -14,6 +14,8 @@ serde.workspace = true
 # La integración real solo existe en Windows: ApiMicrosip.dll es Win32.
 [target.'cfg(windows)'.dependencies]
 async-trait.workspace = true
+chrono.workspace = true
 libloading.workspace = true
+rust_decimal.workspace = true
 tokio.workspace = true
 tracing.workspace = true

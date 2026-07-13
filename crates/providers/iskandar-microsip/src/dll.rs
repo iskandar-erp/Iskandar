@@ -49,6 +49,44 @@ type FnNewTrn = unsafe extern "system" fn(db_handle: i32, trn_type: i32) -> i32;
 // function DBConnected(DBHandle: Integer): Integer; stdcall;  ← 1=conectado, 0=no
 type FnDbConnected = unsafe extern "system" fn(handle: i32) -> i32;
 
+// --- Dataset (consultas SQL de solo lectura) ---
+
+// function TrnStart(TrnHandle: Integer): Integer; stdcall;
+type FnTrnStart = unsafe extern "system" fn(trn: i32) -> ErrCode;
+
+// function TrnCommit(TrnHandle: Integer): Integer; stdcall;
+type FnTrnCommit = unsafe extern "system" fn(trn: i32) -> ErrCode;
+
+// function NewDtst(TrnHandle: Integer): Integer; stdcall;  ← retorna dtst_handle
+type FnNewDtst = unsafe extern "system" fn(trn: i32) -> i32;
+
+// function DtstSelQry(DtstHandle: Integer; Query: PChar): Integer; stdcall;
+type FnDtstSelQry = unsafe extern "system" fn(dtst: i32, query: *const c_char) -> ErrCode;
+
+// function DtstOpen(DtstHandle: Integer): Integer; stdcall;
+type FnDtstOpen = unsafe extern "system" fn(dtst: i32) -> ErrCode;
+
+// function DtstEof(DtstHandle: Integer): Integer; stdcall;  ← 1=fin, 0=hay más
+type FnDtstEof = unsafe extern "system" fn(dtst: i32) -> i32;
+
+// function DtstNext(DtstHandle: Integer): Integer; stdcall;
+type FnDtstNext = unsafe extern "system" fn(dtst: i32) -> ErrCode;
+
+// function DtstClose(DtstHandle: Integer): Integer; stdcall;
+type FnDtstClose = unsafe extern "system" fn(dtst: i32) -> ErrCode;
+
+// function DtstGetFieldAsString(DtstHandle: Integer; FieldName: PChar; FieldValue: PChar): Integer; stdcall;
+type FnDtstGetFieldAsString =
+    unsafe extern "system" fn(dtst: i32, field: *const c_char, value: *mut c_char) -> ErrCode;
+
+// function DtstGetFieldAsInteger(DtstHandle: Integer; FieldName: PChar; Var FieldValue: Integer): Integer; stdcall;
+type FnDtstGetFieldAsInteger =
+    unsafe extern "system" fn(dtst: i32, field: *const c_char, value: *mut i32) -> ErrCode;
+
+// function DtstSetParamAsString(DtstHandle: Integer; ParamName: PChar; ParamValue: PChar): Integer; stdcall;
+type FnDtstSetParamAsString =
+    unsafe extern "system" fn(dtst: i32, name: *const c_char, value: *const c_char) -> ErrCode;
+
 // function DBDisconnect(DBHandle: Integer): Integer; stdcall;
 type FnDbDisconnect = unsafe extern "system" fn(handle: i32) -> ErrCode;
 
@@ -61,6 +99,58 @@ type FnGetLastErrorMessage = unsafe extern "system" fn(buffer: *mut c_char) -> E
 pub struct DbHandle {
     pub(crate) db: i32,
     pub(crate) trn: i32,
+}
+
+/// Lector de campos para una fila activa de un Dataset abierto.
+/// Solo válido dentro del closure pasado a [`MicrosipDll::query`].
+pub(crate) struct RowReader {
+    dtst: i32,
+    get_str: FnDtstGetFieldAsString,
+    get_int: FnDtstGetFieldAsInteger,
+}
+
+impl RowReader {
+    /// Lee un campo de texto. Falla si el campo no existe.
+    pub fn str_field(&self, name: &str) -> iskandar_core::Result<String> {
+        let c_name = cstring(name)?;
+        let mut buf = vec![0u8; 2048];
+        // SAFETY: buf de 2048 bytes válido durante la llamada.
+        let rc = unsafe {
+            (self.get_str)(self.dtst, c_name.as_ptr(), buf.as_mut_ptr() as *mut c_char)
+        };
+        if rc != 0 {
+            return Err(IskandarError::Provider {
+                code: rc,
+                message: format!("error leyendo campo '{name}'"),
+            });
+        }
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        // La DLL puede devolver Windows-1252 en mensajes de error;
+        // los datos de usuario suelen ser ASCII/UTF-8.
+        Ok(String::from_utf8_lossy(&buf[..end]).trim().to_owned())
+    }
+
+    /// Lee un campo de texto; retorna `None` si está vacío o hay error.
+    pub fn opt_str(&self, name: &str) -> Option<String> {
+        self.str_field(name)
+            .ok()
+            .and_then(|s| if s.is_empty() { None } else { Some(s) })
+    }
+
+    /// Lee un campo entero.
+    pub fn int_field(&self, name: &str) -> iskandar_core::Result<i32> {
+        let c_name = cstring(name)?;
+        let mut val: i32 = 0;
+        // SAFETY: val es válido durante la llamada.
+        let rc = unsafe { (self.get_int)(self.dtst, c_name.as_ptr(), &mut val) };
+        if rc != 0 {
+            return Err(IskandarError::Provider {
+                code: rc,
+                message: format!("error leyendo campo int '{name}'"),
+            });
+        }
+        Ok(val)
+    }
 }
 
 pub struct MicrosipDll {
@@ -152,6 +242,88 @@ impl MicrosipDll {
         // SAFETY: handle obtenido de connect(); firma según referencia.
         let rc = unsafe { db_disconnect(handle.db) };
         self.check(rc)
+    }
+
+    /// Ejecuta una query SQL de solo lectura y mapea cada fila con `map_row`.
+    ///
+    /// Gestiona el ciclo completo: `TrnStart` → `NewDtst` → `DtstSelQry` →
+    /// `DtstOpen` → iteración → `DtstClose` → `TrnCommit`.
+    /// Ejecuta una query SQL de solo lectura y mapea cada fila con `map_row`.
+    ///
+    /// `params` son pares `(nombre, valor)` que se enlazan como parámetros
+    /// con nombre (`:nombre` en la SQL) vía `DtstSetParamAsString` — nunca
+    /// se interpolan directamente, por lo que no hay riesgo de SQL injection.
+    ///
+    /// Gestiona el ciclo: `TrnStart` → `NewDtst` → `DtstSelQry` →
+    /// bind params → `DtstOpen` → iteración → `DtstClose` → `TrnCommit`.
+    pub(crate) fn query<T, F>(
+        &self,
+        handle: DbHandle,
+        sql: &str,
+        params: &[(&str, &str)],
+        mut map_row: F,
+    ) -> Result<Vec<T>>
+    where
+        F: FnMut(&RowReader) -> Result<T>,
+    {
+        let _guard = self.guard()?;
+
+        let trn_start: Symbol<FnTrnStart> = self.symbol(b"TrnStart\0")?;
+        let trn_commit: Symbol<FnTrnCommit> = self.symbol(b"TrnCommit\0")?;
+        let new_dtst: Symbol<FnNewDtst> = self.symbol(b"NewDtst\0")?;
+        let dtst_sel_qry: Symbol<FnDtstSelQry> = self.symbol(b"DtstSelQry\0")?;
+        let dtst_set_param: Symbol<FnDtstSetParamAsString> =
+            self.symbol(b"DtstSetParamAsString\0")?;
+        let dtst_open: Symbol<FnDtstOpen> = self.symbol(b"DtstOpen\0")?;
+        let dtst_eof: Symbol<FnDtstEof> = self.symbol(b"DtstEof\0")?;
+        let dtst_next: Symbol<FnDtstNext> = self.symbol(b"DtstNext\0")?;
+        let dtst_close: Symbol<FnDtstClose> = self.symbol(b"DtstClose\0")?;
+        let dtst_get_str: Symbol<FnDtstGetFieldAsString> =
+            self.symbol(b"DtstGetFieldAsString\0")?;
+        let dtst_get_int: Symbol<FnDtstGetFieldAsInteger> =
+            self.symbol(b"DtstGetFieldAsInteger\0")?;
+
+        let c_sql = cstring(sql)?;
+        // Preparar CStrings de parámetros antes del bloque unsafe.
+        let c_params: Vec<(CString, CString)> = params
+            .iter()
+            .map(|(n, v)| Ok((cstring(n)?, cstring(v)?)))
+            .collect::<Result<_>>()?;
+
+        // SAFETY: todas las firmas validadas contra ApiMspBasicaExt.cs.
+        unsafe {
+            self.check(trn_start(handle.trn))?;
+
+            let dtst = new_dtst(handle.trn);
+            if dtst <= 0 {
+                let msg = self.last_error_message().unwrap_or_else(|| "(sin mensaje)".into());
+                return Err(IskandarError::Connection(format!("NewDtst() falló: {msg}")));
+            }
+
+            self.check(dtst_sel_qry(dtst, c_sql.as_ptr()))?;
+
+            for (c_name, c_val) in &c_params {
+                self.check(dtst_set_param(dtst, c_name.as_ptr(), c_val.as_ptr()))?;
+            }
+
+            self.check(dtst_open(dtst))?;
+
+            let reader = RowReader {
+                dtst,
+                get_str: *dtst_get_str,
+                get_int: *dtst_get_int,
+            };
+
+            let mut rows = Vec::new();
+            while dtst_eof(dtst) == 0 {
+                rows.push(map_row(&reader)?);
+                self.check(dtst_next(dtst))?;
+            }
+
+            dtst_close(dtst);
+            self.check(trn_commit(handle.trn))?;
+            Ok(rows)
+        }
     }
 
     // --- Internos ---

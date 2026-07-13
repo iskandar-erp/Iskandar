@@ -1,4 +1,19 @@
-# ApiMicrosip.dll es x86 (32-bit). Todo el workspace debe compilar
-# como i686 para poder cargarla en el mismo proceso.
-[build]
-target = "i686-pc-windows-msvc"
+# ApiMicrosip.dll es x86 (32-bit). En Windows, TODO el workspace debe
+# compilar como i686-pc-windows-msvc para poder cargar la DLL en el mismo
+# proceso (el provider Microsip solo existe bajo cfg(windows)).
+#
+# Ese target NO se fija aqui de forma global porque rompe las builds nativas
+# en macOS/Linux (donde no existe el linker de Windows). Cargo no permite
+# condicionar `build.target` por SO, asi que cada plataforma elige su target:
+#
+#   Windows (build real, carga la DLL):
+#     setx CARGO_BUILD_TARGET i686-pc-windows-msvc   # una sola vez, persistente
+#     # o por invocacion:
+#     cargo build --target i686-pc-windows-msvc
+#
+#   macOS / Linux (desarrollo de core + api, sin DLL):
+#     cargo build            # target nativo, Microsip compila como stub
+#
+# La seccion [target.*] de abajo aplica solo cuando se compila para Windows.
+[target.i686-pc-windows-msvc]
+# (linker/rustflags especificos de Windows pueden ir aqui si hicieran falta)

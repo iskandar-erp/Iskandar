@@ -39,6 +39,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/{provider}/clientes", get(listar_clientes))
         .route("/api/{provider}/clientes/{id}", get(obtener_cliente))
         .route("/api/{provider}/facturas", post(crear_factura))
+        .route("/api/{provider}/facturas/{id}", get(obtener_factura))
         .route("/api/{provider}/inventario/articulos", get(listar_articulos))
         .with_state(state)
 }
@@ -90,6 +91,15 @@ async fn crear_factura(
     let client = state.client(&provider)?;
     let creada = client.facturas()?.crear(factura).await?;
     Ok((StatusCode::CREATED, Json(creada)))
+}
+
+async fn obtener_factura(
+    State(state): State<Arc<ApiState>>,
+    Path((provider, id)): Path<(String, String)>,
+) -> Result<Json<Factura>, ApiError> {
+    let client = state.client(&provider)?;
+    let id = EntidadId::parse(&id);
+    Ok(Json(client.facturas()?.obtener(&id).await?))
 }
 
 async fn listar_articulos(
