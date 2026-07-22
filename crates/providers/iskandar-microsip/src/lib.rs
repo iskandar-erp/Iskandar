@@ -17,6 +17,8 @@ pub mod articulos;
 #[cfg(windows)]
 pub mod clientes;
 #[cfg(windows)]
+pub mod cxc;
+#[cfg(windows)]
 pub mod provider;
 
 pub use models::MicrosipConfig;

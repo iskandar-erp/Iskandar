@@ -41,6 +41,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/{provider}/facturas", post(crear_factura))
         .route("/api/{provider}/facturas/{id}", get(obtener_factura))
         .route("/api/{provider}/inventario/articulos", get(listar_articulos))
+        .route("/api/{provider}/cxc/creditos", post(crear_credito))
         .with_state(state)
 }
 
@@ -109,6 +110,16 @@ async fn listar_articulos(
 ) -> Result<Json<Vec<Articulo>>, ApiError> {
     let client = state.client(&provider)?;
     Ok(Json(client.inventario()?.articulos(filtro).await?))
+}
+
+async fn crear_credito(
+    State(state): State<Arc<ApiState>>,
+    Path(provider): Path<String>,
+    Json(credito): Json<NuevoCredito>,
+) -> Result<(StatusCode, Json<Credito>), ApiError> {
+    let client = state.client(&provider)?;
+    let creado = client.cxc()?.crear_credito(credito).await?;
+    Ok((StatusCode::CREATED, Json(creado)))
 }
 
 /// Traducción de errores del framework a HTTP.

@@ -15,7 +15,9 @@ serde.workspace = true
 [target.'cfg(windows)'.dependencies]
 async-trait.workspace = true
 chrono.workspace = true
+encoding_rs.workspace = true
 libloading.workspace = true
 rust_decimal.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
