@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use iskandar_core::models::*;
 use iskandar_core::{
     ClientesModule, CxcModule, ERPProvider, FacturasModule, InventarioModule, IskandarError,
-    ProviderConfig, Result,
+    ProviderConfig, Result, SecurityAudit,
 };
 
 use chrono::{Local, NaiveDate};
@@ -21,6 +21,7 @@ use crate::clientes::ClientesMicrosip;
 use crate::cxc::CxcMicrosip;
 use crate::dll::{FacturaParams, MicrosipDll, RenglonParams, RowReader};
 use crate::models::MicrosipConfig;
+use crate::security::SecurityMicrosip;
 
 const PAISES: &[Pais] = &[
     Pais::Mexico,
@@ -39,6 +40,7 @@ pub struct MicrosipProvider {
     facturas: FacturasMicrosip,
     articulos: ArticulosMicrosip,
     cxc: CxcMicrosip,
+    security: SecurityMicrosip,
 }
 
 impl MicrosipProvider {
@@ -48,7 +50,8 @@ impl MicrosipProvider {
         let facturas = FacturasMicrosip { dll: dll.clone(), config: config.clone() };
         let articulos = ArticulosMicrosip { dll: dll.clone(), config: config.clone() };
         let cxc = CxcMicrosip { dll: dll.clone(), config: config.clone() };
-        Ok(Self { config, dll, clientes, facturas, articulos, cxc })
+        let security = SecurityMicrosip { dll: dll.clone(), config: config.clone() };
+        Ok(Self { config, dll, clientes, facturas, articulos, cxc, security })
     }
 
     /// Fábrica para registrarse en el `ProviderRegistry`.
@@ -102,6 +105,10 @@ impl ERPProvider for MicrosipProvider {
 
     fn cxc(&self) -> Option<&dyn CxcModule> {
         Some(&self.cxc)
+    }
+
+    fn security(&self) -> Option<&dyn SecurityAudit> {
+        Some(&self.security)
     }
 }
 

@@ -4,6 +4,10 @@
 
 [server]
 port = 8080
+# Token requerido en `Authorization: Bearer <token>` para /api/*.
+# También puede darse por la variable de entorno ISKANDAR_API_TOKEN (con
+# prioridad sobre este valor). El servidor no arranca sin uno de los dos.
+token = "cambiame-por-un-token-largo-y-aleatorio"
 
 [providers.microsip]
 dll_path = 'C:\Microsip\ApiMicrosip.dll'

@@ -16,7 +16,7 @@ use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
 
 use iskandar_api::ApiState;
-use iskandar_core::{ProviderConfig, ProviderRegistry};
+use iskandar_core::{AuditReport, Finding, ProviderConfig, ProviderRegistry};
 
 #[derive(Parser)]
 #[command(
@@ -41,6 +41,13 @@ enum Command {
         provider: String,
         #[arg(long)]
         dll_path: Option<String>,
+        #[arg(long, default_value = "SYSDBA")]
+        usuario: String,
+        /// Password de la base de datos. Requerido: `init` ya no genera un
+        /// default inseguro (antes escribía la contraseña SYSDBA/masterkey
+        /// documentada de Firebird).
+        #[arg(long)]
+        password: String,
     },
     /// Levanta el servidor HTTP con los providers configurados.
     Serve {
@@ -52,6 +59,17 @@ enum Command {
     Test {
         #[arg(long)]
         provider: String,
+    },
+    /// Audita al sistema al que se conecta un provider (gate hacia
+    /// afuera, no una auditoría de Iskandar mismo). Exit code 1 si el
+    /// reporte queda `Blocked` (hay hallazgos bloqueantes), 0 si `Clear`.
+    Audit {
+        #[arg(long)]
+        provider: String,
+        /// Imprime el reporte completo como JSON en vez del formato
+        /// legible agrupado por severidad/disposición.
+        #[arg(long)]
+        json: bool,
     },
     /// Inspecciona el esquema de la base de datos del ERP.
     ///
@@ -87,12 +105,19 @@ struct AppConfig {
 struct ServerConfig {
     #[serde(default = "puerto_default")]
     port: u16,
+    /// Token que deben presentar los clientes en `Authorization: Bearer
+    /// <token>`. También puede darse por la variable de entorno
+    /// `ISKANDAR_API_TOKEN` (tiene prioridad sobre este valor). El servidor
+    /// se niega a arrancar si no hay token por ninguna de las dos vías.
+    #[serde(default)]
+    token: Option<String>,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: puerto_default(),
+            token: None,
         }
     }
 }
@@ -111,9 +136,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let cli = Cli::parse();
     match cli.command {
-        Command::Init { provider, dll_path } => init(&cli.config, &provider, dll_path.as_deref()),
+        Command::Init { provider, dll_path, usuario, password } => {
+            init(&cli.config, &provider, dll_path.as_deref(), &usuario, &password)
+        }
         Command::Serve { port } => serve(&cli.config, port).await,
         Command::Test { provider } => test(&cli.config, &provider).await,
+        Command::Audit { provider, json } => audit(&cli.config, &provider, json).await,
         Command::Schema { provider, tabla, valores, muestra } => {
             schema(&cli.config, &provider, tabla.as_deref(), valores.as_deref(), muestra).await
         }
@@ -138,7 +166,18 @@ fn load_config(path: &Path) -> Result<AppConfig, Box<dyn Error>> {
     Ok(toml::from_str(&raw)?)
 }
 
-fn init(path: &Path, provider: &str, dll_path: Option<&str>) -> Result<(), Box<dyn Error>> {
+/// Escapa un valor para insertarlo en un TOML basic string (comillas dobles).
+fn toml_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn init(
+    path: &Path,
+    provider: &str,
+    dll_path: Option<&str>,
+    usuario: &str,
+    password: &str,
+) -> Result<(), Box<dyn Error>> {
     if path.exists() {
         return Err(format!(
             "'{}' ya existe — edítalo directamente o bórralo primero",
@@ -147,22 +186,28 @@ fn init(path: &Path, provider: &str, dll_path: Option<&str>) -> Result<(), Box<d
         .into());
     }
     let dll = dll_path.unwrap_or(r"C:\Microsip\ApiMicrosip.dll");
+    let usuario = toml_escape(usuario);
+    let password = toml_escape(password);
     let contents = format!(
         r#"# Configuración de Iskandar — generada por `iskandar init`
 [server]
 port = 8080
+# Requerido para levantar el servidor: token que deben presentar los
+# clientes en `Authorization: Bearer <token>`. Puedes darlo aquí o por la
+# variable de entorno ISKANDAR_API_TOKEN (tiene prioridad sobre este valor).
+# token = "reemplaza-esto-por-un-token-largo-y-aleatorio"
 
 [providers.{provider}]
 dll_path = '{dll}'
 db_path = 'C:\Microsip datos\EMPRESA.FDB'
-usuario = "SYSDBA"
-password = "masterkey"
+usuario = "{usuario}"
+password = "{password}"
 existencias_negativas = true
 validar_precio_minimo = false
 "#
     );
     std::fs::write(path, contents)?;
-    println!("Configuración creada en '{}'. Ajusta credenciales y rutas antes de usarla.", path.display());
+    println!("Configuración creada en '{}'. Ajusta la ruta de la base de datos antes de usarla.", path.display());
     Ok(())
 }
 
@@ -175,6 +220,39 @@ async fn serve(config_path: &Path, port: Option<u16>) -> Result<(), Box<dyn Erro
         match registry.create(name, provider_config) {
             Ok(provider) => {
                 tracing::info!(provider = %name, "provider inicializado");
+
+                // Gate hacia afuera: auditar al sistema al que este provider
+                // se conecta ANTES de aceptar tráfico. Providers que no
+                // implementan `SecurityAudit` (devuelven `None`) se saltan
+                // el check — no es un error, simplemente no aplica.
+                if let Some(security) = provider.security() {
+                    match security.security_audit().await {
+                        Ok(report) if report.gate().is_clear() => {
+                            tracing::info!(provider = %name, "security audit: gate CLEAR");
+                        }
+                        Ok(report) => {
+                            eprintln!(
+                                "=== iskandar: el provider '{name}' tiene hallazgos de \
+                                 seguridad BLOQUEANTES — el servidor no arrancará ===\n"
+                            );
+                            eprintln!("{}", formatear_reporte(&report));
+                            return Err(format!(
+                                "provider '{name}': gate de seguridad BLOQUEADO — remedia \
+                                 los hallazgos de arriba y vuelve a intentar (ver \
+                                 `iskandar audit --provider {name}` para el detalle)"
+                            )
+                            .into());
+                        }
+                        Err(e) => {
+                            return Err(format!(
+                                "no se pudo auditar la seguridad del provider '{name}' \
+                                 antes de arrancar: {e}"
+                            )
+                            .into());
+                        }
+                    }
+                }
+
                 providers.insert(name.clone(), provider);
             }
             Err(e) => {
@@ -189,8 +267,19 @@ async fn serve(config_path: &Path, port: Option<u16>) -> Result<(), Box<dyn Erro
         );
     }
 
+    let api_token = std::env::var("ISKANDAR_API_TOKEN")
+        .ok()
+        .or_else(|| config.server.token.clone())
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| {
+            "no se configuró un token de autenticación para la API — define la variable de \
+             entorno ISKANDAR_API_TOKEN o '[server].token' en la configuración antes de \
+             levantar el servidor"
+                .to_string()
+        })?;
+
     let port = port.unwrap_or(config.server.port);
-    let state = Arc::new(ApiState::new(providers));
+    let state = Arc::new(ApiState::new(providers, api_token));
     let app = iskandar_api::router(state);
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
@@ -307,4 +396,90 @@ async fn test(config_path: &Path, provider_name: &str) -> Result<(), Box<dyn Err
         }
     }
     Ok(())
+}
+
+/// `iskandar audit --provider <nombre> [--json]`.
+///
+/// Corre el gate hacia afuera bajo demanda (fuera del boot de `serve`).
+/// Exit code: 0 si el reporte queda `Clear`, 1 si queda `Blocked` (hallazgos
+/// bloqueantes) o si el audit mismo no pudo correr.
+async fn audit(config_path: &Path, provider_name: &str, json: bool) -> Result<(), Box<dyn Error>> {
+    let config = load_config(config_path)?;
+    let provider_config = config.providers.get(provider_name).ok_or_else(|| {
+        format!(
+            "no hay sección [providers.{provider_name}] en '{}'",
+            config_path.display()
+        )
+    })?;
+
+    let registry = build_registry();
+    let provider = registry.create(provider_name, provider_config)?;
+
+    let security = provider.security().ok_or_else(|| {
+        format!(
+            "el provider '{provider_name}' no implementa auditoría de seguridad \
+             (SecurityAudit) — no hay nada que auditar"
+        )
+    })?;
+
+    let report = security.security_audit().await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("{}", formatear_reporte(&report));
+    }
+
+    if !report.gate().is_clear() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Formato legible del reporte, agrupado por severidad (más grave primero)
+/// y con la remediación completa de cada hallazgo. Usado tanto por
+/// `iskandar audit` (stdout) como por el gate de `serve` (stderr).
+fn formatear_reporte(report: &AuditReport) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "provider:  {}", report.provider);
+    let _ = writeln!(out, "hallazgos: {}", report.findings.len());
+    let _ = writeln!(out);
+
+    if report.findings.is_empty() {
+        let _ = writeln!(out, "(sin hallazgos)");
+    }
+
+    // Bloqueantes primero, luego por severidad descendente — es el orden
+    // en que a un operador le urge leerlos.
+    let mut ordenados: Vec<&Finding> = report.findings.iter().collect();
+    ordenados.sort_by_key(|f| (!f.is_blocking(), std::cmp::Reverse(f.severity)));
+
+    for f in ordenados {
+        let disp = if f.is_blocking() { "BLOCKING" } else { "informational" };
+        let _ = writeln!(out, "[{:?} / {disp}] {} ({})", f.severity, f.title, f.id.0);
+        let _ = writeln!(out, "  {}", f.detail);
+        if let Some(ev) = &f.evidence {
+            let _ = writeln!(out, "  evidencia: {ev}");
+        }
+        let _ = writeln!(out, "  remediación: {}", f.remediation.summary);
+        for (i, paso) in f.remediation.steps.iter().enumerate() {
+            let _ = writeln!(out, "    {}. {paso}", i + 1);
+        }
+        let _ = writeln!(out, "  re-verificación: {:?}", f.remediation.reverify);
+        let _ = writeln!(out);
+    }
+
+    match report.gate() {
+        iskandar_core::GateOutcome::Clear => {
+            let _ = writeln!(out, "gate: CLEAR");
+        }
+        iskandar_core::GateOutcome::Blocked { blockers } => {
+            let ids: Vec<&str> = blockers.iter().map(|b| b.0).collect();
+            let _ = writeln!(out, "gate: BLOCKED — bloqueantes: {ids:?}");
+        }
+    }
+
+    out
 }

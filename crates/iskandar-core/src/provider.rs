@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{IskandarError, Result};
 use crate::models::*;
+use crate::security::SecurityAudit;
 
 #[async_trait]
 pub trait ERPProvider: Send + Sync {
@@ -62,6 +63,15 @@ pub trait ERPProvider: Send + Sync {
         None
     }
 
+    /// Auditoría de seguridad hacia afuera (a qué sistema me conecto), no
+    /// del propio Iskandar. Ver `iskandar_core::security` para el detalle
+    /// de por qué es un módulo opcional y no un supertrait: un ERP que no
+    /// tenga superficie de credenciales de fábrica (p. ej. un futuro
+    /// provider cloud) simplemente no lo implementa.
+    fn security(&self) -> Option<&dyn SecurityAudit> {
+        None
+    }
+
     /// Qué módulos anuncia este provider. Útil para discovery
     /// (`GET /api/providers`).
     fn capacidades(&self) -> Capacidades {
@@ -73,6 +83,7 @@ pub trait ERPProvider: Send + Sync {
             compras: self.compras().is_some(),
             cxc: self.cxc().is_some(),
             contabilidad: self.contabilidad().is_some(),
+            security: self.security().is_some(),
         }
     }
 }
@@ -86,6 +97,7 @@ pub struct Capacidades {
     pub compras: bool,
     pub cxc: bool,
     pub contabilidad: bool,
+    pub security: bool,
 }
 
 #[async_trait]

@@ -13,6 +13,7 @@ pub mod error;
 pub mod models;
 pub mod provider;
 pub mod registry;
+pub mod security;
 
 pub use client::ERPClient;
 pub use config::ProviderConfig;
@@ -22,3 +23,7 @@ pub use provider::{
     FacturasModule, InventarioModule, PedidosModule,
 };
 pub use registry::{ProviderFactory, ProviderRegistry};
+pub use security::{
+    AuditError, AuditReport, Disposition, Finding, FindingId, GateOutcome, Remediation, Reverify,
+    SecurityAudit, Severity,
+};

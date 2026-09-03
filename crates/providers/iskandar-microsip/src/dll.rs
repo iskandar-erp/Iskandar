@@ -323,8 +323,15 @@ impl RowReader {
     /// Lee un campo de texto. Falla si el campo no existe.
     pub fn str_field(&self, name: &str) -> iskandar_core::Result<String> {
         let c_name = cstring(name)?;
-        let mut buf = vec![0u8; 2048];
-        // SAFETY: buf de 2048 bytes válido durante la llamada.
+        // DtstGetFieldAsString no recibe longitud de buffer y escribe el
+        // valor completo del campo (Refer.md: "responsabilidad de la
+        // aplicación reservar espacio suficiente"). Firebird permite
+        // VARCHAR(32765)/CHAR(32767); el buffer cubre el máximo documentado
+        // más el terminador NUL para evitar un desbordamiento de heap.
+        const MAX_FIELD_BYTES: usize = 32_767 + 1;
+        let mut buf = vec![0u8; MAX_FIELD_BYTES];
+        // SAFETY: buf cubre el máximo tamaño de campo Firebird documentado,
+        // válido durante la llamada.
         let rc = unsafe {
             (self.get_str)(self.dtst, c_name.as_ptr(), buf.as_mut_ptr() as *mut c_char)
         };

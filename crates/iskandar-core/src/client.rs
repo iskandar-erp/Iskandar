@@ -58,4 +58,8 @@ impl ERPClient {
     pub fn contabilidad(&self) -> Result<&dyn ContabilidadModule> {
         self.modulo(self.provider.contabilidad(), "contabilidad")
     }
+
+    pub fn security(&self) -> Result<&dyn crate::security::SecurityAudit> {
+        self.modulo(self.provider.security(), "security")
+    }
 }

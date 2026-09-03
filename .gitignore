@@ -22,3 +22,6 @@ web/
 # Variables de entorno locales
 .env
 .env.*
+
+# Reportes locales de strix (pueden contener detalles de infraestructura)
+strix_runs/

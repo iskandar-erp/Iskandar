@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -13,14 +14,19 @@ use serde_json::json;
 use iskandar_core::models::*;
 use iskandar_core::{ERPClient, ERPProvider, IskandarError};
 
-/// Estado compartido del servidor: providers activos por nombre.
+/// Estado compartido del servidor: providers activos por nombre y el token
+/// que autoriza las rutas `/api/*`. `/health` queda fuera de la protección.
 pub struct ApiState {
     providers: HashMap<String, Arc<dyn ERPProvider>>,
+    api_token: String,
 }
 
 impl ApiState {
-    pub fn new(providers: HashMap<String, Arc<dyn ERPProvider>>) -> Self {
-        Self { providers }
+    pub fn new(providers: HashMap<String, Arc<dyn ERPProvider>>, api_token: String) -> Self {
+        Self {
+            providers,
+            api_token,
+        }
     }
 
     fn client(&self, nombre: &str) -> Result<ERPClient, ApiError> {
@@ -33,8 +39,7 @@ impl ApiState {
 }
 
 pub fn router(state: Arc<ApiState>) -> Router {
-    Router::new()
-        .route("/health", get(health))
+    let api_routes = Router::new()
         .route("/api/providers", get(listar_providers))
         .route("/api/{provider}/clientes", get(listar_clientes))
         .route("/api/{provider}/clientes/{id}", get(obtener_cliente))
@@ -42,7 +47,49 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/{provider}/facturas/{id}", get(obtener_factura))
         .route("/api/{provider}/inventario/articulos", get(listar_articulos))
         .route("/api/{provider}/cxc/creditos", post(crear_credito))
+        // route_layer solo protege las rutas registradas arriba en este
+        // Router (no /health, que se agrega después sin el middleware).
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
+
+    Router::new()
+        .route("/health", get(health))
+        .merge(api_routes)
         .with_state(state)
+}
+
+/// Exige `Authorization: Bearer <token>` en cada request a `/api/*`.
+/// Comparación en tiempo constante para no filtrar el token por timing.
+async fn require_token(
+    State(state): State<Arc<ApiState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+
+    match presented {
+        Some(token) if constant_time_eq(token.as_bytes(), state.api_token.as_bytes()) => {
+            next.run(request).await
+        }
+        _ => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        )
+            .into_response(),
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 async fn health() -> impl IntoResponse {
