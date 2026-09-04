@@ -1,0 +1,16 @@
+# Waivers de Iskandar — copia este archivo como `iskandar.waivers.toml`
+# (junto a tu iskandar.toml) para acallar hallazgos INFORMATIONAL ya
+# aceptados por el dueño del sistema auditado.
+#
+# Un waiver NUNCA salta un hallazgo BLOCKING — `iskandar audit`/`serve`
+# ignoran con una advertencia cualquier entrada que apunte a uno; la
+# invariante está garantizada por el tipo, no por este archivo.
+#
+# `finding_id` es el identificador estable que aparece entre paréntesis en
+# la salida de `iskandar audit` (p. ej. F-MSIP-FACTORY-CREDS-CONFIG).
+
+[[waiver]]
+provider = "microsip"
+finding_id = "F-MSIP-FACTORY-CREDS-CONFIG"
+granted_at = "2026-09-04T00:00:00Z"
+note = "Config local de desarrollo, sin datos reales — riesgo aceptado temporalmente."

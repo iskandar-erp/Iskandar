@@ -568,6 +568,7 @@ impl MicrosipDll {
         let set_error_handling: Symbol<FnSetErrorHandling> = self.symbol(b"SetErrorHandling\0")?;
         let new_db: Symbol<FnNewDb> = self.symbol(b"NewDB\0")?;
         let db_connect: Symbol<FnDbConnect> = self.symbol(b"DBConnect\0")?;
+        let db_disconnect: Symbol<FnDbDisconnect> = self.symbol(b"DBDisconnect\0")?;
 
         let c_path = cstring(db_path)?;
         let c_user = cstring(usuario)?;
@@ -602,7 +603,22 @@ impl MicrosipDll {
             }
 
             tracing::debug!("DBConnect(db={db_h}, path={db_path:?})");
-            self.check(db_connect(db_h, c_path.as_ptr(), c_user.as_ptr(), c_pass.as_ptr()))?;
+            if let Err(e) = self.check(db_connect(db_h, c_path.as_ptr(), c_user.as_ptr(), c_pass.as_ptr())) {
+                // La Api Básica NO expone ninguna función para liberar un
+                // objeto Database/Transaction directamente (no hay
+                // FreeDB/FreeTrn — mismo hueco documentado para NewPL en
+                // otra parte de este archivo). DBDisconnect es lo único
+                // disponible: "Termina la conexión... cerrando antes
+                // cualquier dataset o sql asociado" (Refer.md L344-347) — no
+                // exige que DBConnect haya tenido éxito, así que es seguro
+                // llamarla aquí como best-effort para no dejar el objeto DB
+                // completamente huérfano. No libera trn_h (no existe
+                // FreeTrn); ese handle sí queda sin reclamar hasta que el
+                // proceso termine, igual que el PL handle global.
+                tracing::debug!("DBConnect falló (db={db_h}), liberando vía DBDisconnect best-effort");
+                db_disconnect(db_h);
+                return Err(e);
+            }
             (db_h, trn_h)
         };
 

@@ -109,12 +109,29 @@ pub struct Finding {
     /// Evidencia de por qué se levantó el hallazgo (p. ej. "SYSDBA acepta
     /// masterkey", "3050 responde desde 0.0.0.0"). Opcional, para el reporte.
     pub evidence: Option<String>,
+    /// Presente si el dueño firmó un waiver para este hallazgo (ver
+    /// `Reverify::OwnerWaiver`). Puramente informativo para el reporte —
+    /// `is_blocking()`/`gate()` NO lo consultan, así que un waiver
+    /// estructuralmente no puede des-bloquear un `Disposition::Blocking`;
+    /// la invariante del sketch original ("un Blocking NUNCA se salta con
+    /// firma") queda garantizada por el tipo, no por disciplina de quien
+    /// aplica los waivers.
+    pub waived: Option<Waiver>,
 }
 
 impl Finding {
     pub fn is_blocking(&self) -> bool {
         matches!(self.disposition, Disposition::Blocking)
     }
+}
+
+/// Registro de que el dueño aceptó el riesgo de un hallazgo `Informational`
+/// (persistido externamente, p. ej. `iskandar.waivers.toml` — ver
+/// `iskandar-cli`; este tipo solo carga el dato, no sabe leer archivos).
+#[derive(Debug, Clone, Serialize)]
+pub struct Waiver {
+    pub granted_at: String,
+    pub note: String,
 }
 
 /// El reporte completo de un audit contra un provider.

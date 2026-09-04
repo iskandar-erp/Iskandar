@@ -25,5 +25,5 @@ pub use provider::{
 pub use registry::{ProviderFactory, ProviderRegistry};
 pub use security::{
     AuditError, AuditReport, Disposition, Finding, FindingId, GateOutcome, Remediation, Reverify,
-    SecurityAudit, Severity,
+    SecurityAudit, Severity, Waiver,
 };

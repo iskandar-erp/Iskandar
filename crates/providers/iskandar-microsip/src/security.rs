@@ -155,6 +155,9 @@ fn finding_factory_creds_active(db_path: &str) -> Finding {
             reverify: Reverify::ReRunCheck,
         },
         evidence: Some(format!("SYSDBA acepta la contraseña de fábrica en {db_path}")),
+        // Blocking: estructuralmente no waiveable (ver doc de `Finding::waived`
+        // en iskandar-core) — no tiene sentido ni siquiera poblarlo aquí.
+        waived: None,
     }
 }
 
@@ -187,5 +190,9 @@ fn finding_factory_creds_config() -> Finding {
              'masterkey' (comparación literal, sin truncar)"
                 .into(),
         ),
+        // Informational: sí puede llevar waiver — se rellena en
+        // iskandar-cli al cargar iskandar.waivers.toml, no aquí (este
+        // módulo no sabe de archivos de waiver).
+        waived: None,
     }
 }

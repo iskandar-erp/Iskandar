@@ -16,7 +16,7 @@ use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
 
 use iskandar_api::ApiState;
-use iskandar_core::{AuditReport, Finding, ProviderConfig, ProviderRegistry};
+use iskandar_core::{AuditReport, Finding, ProviderConfig, ProviderRegistry, Waiver};
 
 #[derive(Parser)]
 #[command(
@@ -126,6 +126,75 @@ fn puerto_default() -> u16 {
     8080
 }
 
+/// Un waiver persistido: el dueño acepta el riesgo de un hallazgo
+/// `Disposition::Informational` específico. Vive en `iskandar.waivers.toml`
+/// (junto al archivo de config), NO en `iskandar.toml` — es estado de
+/// decisión con timestamp, no configuración de despliegue; mezclarlo
+/// invitaría a que un `iskandar init` o una edición de la config lo pisen.
+#[derive(Debug, Clone, Deserialize)]
+struct WaiverEntry {
+    provider: String,
+    finding_id: String,
+    granted_at: String,
+    note: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct WaiversFile {
+    #[serde(default, rename = "waiver")]
+    waivers: Vec<WaiverEntry>,
+}
+
+fn waivers_path(config_path: &Path) -> PathBuf {
+    config_path.with_file_name("iskandar.waivers.toml")
+}
+
+/// Carga `iskandar.waivers.toml` si existe; ausencia del archivo NO es
+/// error (ningún waiver otorgado todavía es el estado normal).
+fn load_waivers(config_path: &Path) -> Result<Vec<WaiverEntry>, Box<dyn Error>> {
+    let path = waivers_path(config_path);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| format!("no se pudo leer '{}': {e}", path.display()))?;
+    let file: WaiversFile = toml::from_str(&raw)?;
+    Ok(file.waivers)
+}
+
+/// Marca en el reporte los hallazgos que tienen un waiver vigente.
+///
+/// Un waiver que apunta a un hallazgo `Blocking` se ignora con una
+/// advertencia en vez de aplicarse. La invariante real ("un Blocking nunca
+/// se salta con firma") ya está garantizada por el tipo — `Finding::
+/// is_blocking()`/`AuditReport::gate()` no consultan `waived` en absoluto,
+/// así que un waiver aquí no podría des-bloquear nada aunque quisiéramos —
+/// pero avisamos para que el operador no piense que su waiver tuvo efecto
+/// en silencio.
+fn aplicar_waivers(report: &mut AuditReport, waivers: &[WaiverEntry]) {
+    for finding in &mut report.findings {
+        let Some(w) = waivers
+            .iter()
+            .find(|w| w.provider == report.provider && w.finding_id == finding.id.0)
+        else {
+            continue;
+        };
+        if finding.is_blocking() {
+            tracing::warn!(
+                provider = %report.provider,
+                finding = %finding.id.0,
+                "hay un waiver para un hallazgo BLOQUEANTE — se ignora, un Blocking nunca se \
+                 salta con firma"
+            );
+            continue;
+        }
+        finding.waived = Some(Waiver {
+            granted_at: w.granted_at.clone(),
+            note: w.note.clone(),
+        });
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt()
@@ -214,6 +283,7 @@ validar_precio_minimo = false
 async fn serve(config_path: &Path, port: Option<u16>) -> Result<(), Box<dyn Error>> {
     let config = load_config(config_path)?;
     let registry = build_registry();
+    let waivers = load_waivers(config_path)?;
 
     let mut providers = HashMap::new();
     for (name, provider_config) in &config.providers {
@@ -227,21 +297,23 @@ async fn serve(config_path: &Path, port: Option<u16>) -> Result<(), Box<dyn Erro
                 // el check — no es un error, simplemente no aplica.
                 if let Some(security) = provider.security() {
                     match security.security_audit().await {
-                        Ok(report) if report.gate().is_clear() => {
-                            tracing::info!(provider = %name, "security audit: gate CLEAR");
-                        }
-                        Ok(report) => {
-                            eprintln!(
-                                "=== iskandar: el provider '{name}' tiene hallazgos de \
-                                 seguridad BLOQUEANTES — el servidor no arrancará ===\n"
-                            );
-                            eprintln!("{}", formatear_reporte(&report));
-                            return Err(format!(
-                                "provider '{name}': gate de seguridad BLOQUEADO — remedia \
-                                 los hallazgos de arriba y vuelve a intentar (ver \
-                                 `iskandar audit --provider {name}` para el detalle)"
-                            )
-                            .into());
+                        Ok(mut report) => {
+                            aplicar_waivers(&mut report, &waivers);
+                            if report.gate().is_clear() {
+                                tracing::info!(provider = %name, "security audit: gate CLEAR");
+                            } else {
+                                eprintln!(
+                                    "=== iskandar: el provider '{name}' tiene hallazgos de \
+                                     seguridad BLOQUEANTES — el servidor no arrancará ===\n"
+                                );
+                                eprintln!("{}", formatear_reporte(&report));
+                                return Err(format!(
+                                    "provider '{name}': gate de seguridad BLOQUEADO — remedia \
+                                     los hallazgos de arriba y vuelve a intentar (ver \
+                                     `iskandar audit --provider {name}` para el detalle)"
+                                )
+                                .into());
+                            }
                         }
                         Err(e) => {
                             return Err(format!(
@@ -422,7 +494,8 @@ async fn audit(config_path: &Path, provider_name: &str, json: bool) -> Result<()
         )
     })?;
 
-    let report = security.security_audit().await?;
+    let mut report = security.security_audit().await?;
+    aplicar_waivers(&mut report, &load_waivers(config_path)?);
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -462,6 +535,9 @@ fn formatear_reporte(report: &AuditReport) -> String {
         let _ = writeln!(out, "  {}", f.detail);
         if let Some(ev) = &f.evidence {
             let _ = writeln!(out, "  evidencia: {ev}");
+        }
+        if let Some(w) = &f.waived {
+            let _ = writeln!(out, "  WAIVER otorgado {} — {}", w.granted_at, w.note);
         }
         let _ = writeln!(out, "  remediación: {}", f.remediation.summary);
         for (i, paso) in f.remediation.steps.iter().enumerate() {

@@ -4,6 +4,9 @@ target/
 
 # Usar iskandar.example.toml como plantilla
 iskandar.toml
+# Usar iskandar.waivers.example.toml como plantilla — estado de decisión
+# con timestamp, no configuración compartida
+iskandar.waivers.toml
 *.fdb
 
 
