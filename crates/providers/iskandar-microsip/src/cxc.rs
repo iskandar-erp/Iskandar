@@ -35,7 +35,10 @@ use chrono::Local;
 
 use crate::dll::{AplicacionCreditoParams, CreditoParams, MicrosipDll, RowReader};
 use crate::models::MicrosipConfig;
-use crate::provider::{dec_to_f64, entidad_id_a_i32, extra_f64, extra_i64, run_blocking, valor_json_a_texto};
+use crate::provider::{
+    dec_to_f64, dinero_a_dll, entidad_id_a_i32, extra_f64, extra_i64, run_blocking,
+    valor_json_a_texto,
+};
 
 pub struct CxcMicrosip {
     pub(crate) dll: Arc<MicrosipDll>,
@@ -177,7 +180,16 @@ fn mapear_nuevo_credito(credito: &NuevoCredito) -> Result<CreditoParams> {
 
     let extra = &credito.extra;
     let cobrador_id = extra_i64(extra, "CobradorId", DEFAULT_COBRADOR_ID)? as i32;
-    let dscto_ppag_default = extra_f64(extra, "DsctoPpag", DEFAULT_DSCTO_PPAG)?;
+    // Es dinero ("Importe de descuento por pronto pago", Refer.md L574),
+    // misma escala x100 que el resto de los montos — pero -1.0 (default,
+    // "automático") y 0.0 (override con CFDI de cobros activo) son
+    // sentinelas, no montos, y no deben escalarse.
+    let dscto_ppag_raw = extra_f64(extra, "DsctoPpag", DEFAULT_DSCTO_PPAG)?;
+    let dscto_ppag_default = if dscto_ppag_raw == DEFAULT_DSCTO_PPAG || dscto_ppag_raw == 0.0 {
+        dscto_ppag_raw
+    } else {
+        dinero_a_dll(dscto_ppag_raw)
+    };
 
     let lista_parametros = construir_lista_parametros(extra);
 
@@ -219,7 +231,10 @@ fn mapear_aplicacion(
         .folio_cargo
         .clone()
         .unwrap_or_else(|| DEFAULT_FOLIO_CARGO.to_string());
-    let importe = dec_to_f64("aplicaciones[].importe", aplicacion.importe)?;
+    // Es dinero — misma escala x100 que PrecioUnitario en facturas
+    // (ver `dinero_a_dll` en provider.rs), no probada en vivo todavía para
+    // Cxc específicamente pero consistente con el resto de la Api.
+    let importe = dinero_a_dll(dec_to_f64("aplicaciones[].importe", aplicacion.importe)?);
 
     Ok(AplicacionCreditoParams {
         cargo_id,

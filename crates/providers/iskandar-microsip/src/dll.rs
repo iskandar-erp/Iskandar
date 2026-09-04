@@ -888,9 +888,11 @@ impl MicrosipDll {
                 for renglon in &params.renglones {
                     let c_notas = cstring_ansi(&renglon.notas)?;
                     tracing::debug!(
-                        "RenglonFactura(articulo={}, unidades={})",
+                        "RenglonFactura(articulo={}, unidades={}, precio_unitario={}, pctje_dscto={})",
                         renglon.articulo_id,
-                        renglon.unidades
+                        renglon.unidades,
+                        renglon.precio_unitario,
+                        renglon.pctje_dscto
                     );
                     self.check_ventas(renglon_factura(
                         renglon.articulo_id,

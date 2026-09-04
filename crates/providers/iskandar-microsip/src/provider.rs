@@ -264,14 +264,20 @@ const DEFAULT_DIR_CONSIG_ID: i64 = 0;
 /// 0 = almacén principal de la empresa. Documentado (Refer.md L725-727).
 const DEFAULT_ALMACEN_ID: i64 = 0;
 /// SUPUESTO NO VERIFICADO: la doc no da default para TipoDscto/Descuento;
-/// 'P' + 0.0 es un no-op inequívoco (0% de descuento extra).
+/// 'P' + 0.0 es un no-op inequívoco (0% de descuento extra). Con
+/// TipoDscto='P' (el default), Descuento es un PORCENTAJE y no debe pasar
+/// por `dinero_a_dll` — si algún día un llamador usa TipoDscto='$' (monto
+/// fijo), Descuento pasaría a ser dinero y necesitaría la misma escala que
+/// el resto de los montos (ver `dinero_a_dll`); no se implementa ese caso
+/// condicional porque nunca se ha probado en vivo.
 const DEFAULT_TIPO_DSCTO: &str = "P";
 const DEFAULT_DESCUENTO: f64 = 0.0;
 /// Documentado como opcional (Refer.md L740).
 const DEFAULT_ORDEN_COMPRA: &str = "";
 /// SUPUESTO NO VERIFICADO: la doc no da default; 0.0 es el único valor
 /// que no dispara los errores 13/15 ("artículo de fletes/otros cargos no
-/// está definido en las preferencias de la empresa").
+/// está definido en las preferencias de la empresa"). Son montos de
+/// dinero — pasan por `dinero_a_dll` en `mapear_nueva_factura`.
 const DEFAULT_FLETES: f64 = 0.0;
 const DEFAULT_OTROS_CARGOS: f64 = 0.0;
 /// -1 = según las políticas de comisión de vendedores. Documentado
@@ -345,8 +351,9 @@ fn mapear_nueva_factura(factura: &NuevaFactura) -> Result<FacturaParams> {
     let tipo_dscto = extra_string(extra, "TipoDscto", DEFAULT_TIPO_DSCTO)?;
     let descuento = extra_f64(extra, "Descuento", DEFAULT_DESCUENTO)?;
     let orden_compra = extra_string(extra, "OrdenCompra", DEFAULT_ORDEN_COMPRA)?;
-    let fletes = extra_f64(extra, "Fletes", DEFAULT_FLETES)?;
-    let otros_cargos = extra_f64(extra, "OtrosCargos", DEFAULT_OTROS_CARGOS)?;
+    // Fletes/OtrosCargos son dinero (el default 0.0 no cambia al escalar).
+    let fletes = dinero_a_dll(extra_f64(extra, "Fletes", DEFAULT_FLETES)?);
+    let otros_cargos = dinero_a_dll(extra_f64(extra, "OtrosCargos", DEFAULT_OTROS_CARGOS)?);
     let pctje_comis = extra_f64(extra, "PctjeComis", DEFAULT_PCTJE_COMIS)?;
     let cond_pago_id = extra_i64(extra, "CondPagoId", DEFAULT_COND_PAGO_ID)? as i32;
     let vendedor_id = extra_i64(extra, "VendedorId", DEFAULT_VENDEDOR_ID)? as i32;
@@ -422,7 +429,10 @@ fn mapear_renglon(renglon: &Renglon) -> Result<RenglonParams> {
     let articulo_id = entidad_id_a_i32("articulo_id", &renglon.articulo_id)?;
     let unidades = dec_to_f64("unidades", renglon.unidades)?;
     let precio_unitario = match renglon.precio_unitario {
-        Some(p) => dec_to_f64("precio_unitario", p)?,
+        // Es dinero, no el sentinela -1.0 documentado (que solo aplica en
+        // la rama `None`) — pasa por `dinero_a_dll`. Ver el comentario
+        // extenso de esa función para la evidencia en vivo.
+        Some(p) => dinero_a_dll(dec_to_f64("precio_unitario", p)?),
         None => DEFAULT_PRECIO_UNITARIO,
     };
     let pctje_dscto = match renglon.descuento_pctje {
@@ -451,6 +461,32 @@ pub(crate) fn dec_to_f64(campo: &str, valor: Decimal) -> Result<f64> {
     valor
         .to_f64()
         .ok_or_else(|| IskandarError::Validation(format!("no se pudo convertir {campo}={valor} a f64")))
+}
+
+/// Escala un monto en pesos al formato que la Api de Microsip espera en
+/// sus parámetros `Double` de dinero (`PrecioUnitario`, `Fletes`,
+/// `OtrosCargos`, `ImporteCobro`, `RenglonCreditoCc.Importe`, etc.): el
+/// mismo entero-por-100 que usa internamente para `NUMERIC(*,2)` en las
+/// tablas de documentos (`DOCTOS_VE`/`DOCTOS_CC`, confirmado con
+/// `RDB$FIELD_SCALE` vía `describir_tabla`).
+///
+/// **Verificado en vivo 2026-07-29** contra `TEST_PRUEBAS.FDB` con 3 casos
+/// independientes (no es un supuesto): `PrecioUnitario=500.0` con
+/// `Unidades=1` se registró como `IMPORTE_NETO=$5.00`; `PrecioUnitario=
+/// 50000.0` se registró como `$500.00`; `PrecioUnitario=10000.0` x
+/// `Unidades=3` se registró como `$300.00` netos (+16% IVA = total
+/// `$348.00`, exacto). Se descartó que fuera un artefacto del artículo de
+/// prueba (`ARTICULOS.FACTOR_VENTA=0`, `APLICAR_FACTOR_VENTA='N'`, sin
+/// ningún campo de conversión activo). `Refer.md` NO documenta esta escala
+/// para ningún parámetro `Double` de dinero — se descubrió empíricamente
+/// al investigar el bug de `total` reportado en la sesión 2026-07-17
+/// (factura de prueba con total `5.80` en vez de `580.00`).
+///
+/// NO aplica a parámetros que son PORCENTAJES (`PctjeDscto`, `PctjeComis`,
+/// `DsctoPpag`) ni a sus sentinelas documentados (típicamente `-1.0` =
+/// "según políticas de Microsip") — esos se pasan tal cual, sin escalar.
+pub(crate) fn dinero_a_dll(pesos: f64) -> f64 {
+    pesos * 100.0
 }
 
 pub(crate) fn extra_i64(extra: &Extra, clave: &str, default: i64) -> Result<i64> {
@@ -486,9 +522,14 @@ pub(crate) fn extra_string(extra: &Extra, clave: &str, default: &str) -> Result<
 /// validación explícito si falta, nunca un 0/-1 adivinado.
 fn importe_cobro_requerido(extra: &Extra) -> Result<f64> {
     match extra.get("ImporteCobro") {
-        Some(v) => v.as_f64().ok_or_else(|| {
-            IskandarError::Validation("extra.ImporteCobro debe ser numérico".into())
-        }),
+        Some(v) => {
+            let pesos = v.as_f64().ok_or_else(|| {
+                IskandarError::Validation("extra.ImporteCobro debe ser numérico".into())
+            })?;
+            // -1.0 es el sentinela documentado ("cobra el total"), no un
+            // monto — no debe escalarse. Cualquier otro valor es dinero.
+            Ok(if pesos == -1.0 { pesos } else { dinero_a_dll(pesos) })
+        }
         None => Err(IskandarError::Validation(
             "extra.ImporteCobro es obligatorio y no tiene default seguro: -1 registra \
              el cobro TOTAL de la factura automáticamente; no existe ningún sentinela \
@@ -564,7 +605,9 @@ impl MicrosipProvider {
                 handle,
                 "SELECT TRIM(f.RDB$FIELD_NAME) AS CAMPO, \
                         fs.RDB$FIELD_TYPE AS TIPO_ID, \
-                        fs.RDB$FIELD_LENGTH AS LONGITUD \
+                        fs.RDB$FIELD_LENGTH AS LONGITUD, \
+                        fs.RDB$FIELD_SCALE AS ESCALA, \
+                        fs.RDB$FIELD_SUB_TYPE AS SUBTIPO \
                  FROM RDB$RELATION_FIELDS f \
                  JOIN RDB$FIELDS fs ON f.RDB$FIELD_SOURCE = fs.RDB$FIELD_NAME \
                  WHERE TRIM(f.RDB$RELATION_NAME) = :tabla \
@@ -574,9 +617,15 @@ impl MicrosipProvider {
                     let nombre = row.str_field("CAMPO")?;
                     let tipo_id = row.int_field("TIPO_ID")?;
                     let longitud = row.int_field("LONGITUD").unwrap_or(0);
+                    // RDB$FIELD_SCALE es 0 o negativo (p. ej. -2 = 2
+                    // decimales); RDB$FIELD_SUB_TYPE 1/2 marca NUMERIC/DECIMAL
+                    // sobre un entero base — sin esto no hay forma de saber
+                    // la escala real de un campo monetario, solo adivinarla.
+                    let escala = row.int_field("ESCALA").unwrap_or(0);
+                    let subtipo = row.int_field("SUBTIPO").unwrap_or(0);
                     Ok(CampoSchema {
                         nombre,
-                        tipo: tipo_firebird(tipo_id, longitud),
+                        tipo: tipo_firebird(tipo_id, longitud, subtipo, escala),
                     })
                 },
             );
@@ -649,7 +698,20 @@ impl MicrosipProvider {
     }
 }
 
-fn tipo_firebird(id: i32, longitud: i32) -> String {
+fn tipo_firebird(id: i32, longitud: i32, subtipo: i32, escala: i32) -> String {
+    // Un NUMERIC(p,s)/DECIMAL(p,s) de Firebird se almacena en un entero
+    // base (SMALLINT/INTEGER/BIGINT) marcado con RDB$FIELD_SUB_TYPE 1 o 2
+    // y RDB$FIELD_SCALE negativo. Sin revisar subtipo/escala, un
+    // SMALLINT/INTEGER/BIGINT "crudo" es indistinguible de un monto
+    // decimal — la única forma de saber cuántos decimales tiene un campo
+    // monetario es leer esto, nunca asumirlo.
+    if (subtipo == 1 || subtipo == 2) && escala < 0 {
+        let tipo_base = match subtipo {
+            1 => "NUMERIC",
+            _ => "DECIMAL",
+        };
+        return format!("{tipo_base}(*,{})", -escala);
+    }
     match id {
         14 => format!("CHAR({longitud})"),
         37 => format!("VARCHAR({longitud})"),
